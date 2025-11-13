@@ -32,7 +32,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value={{ github.sha }}
+            type=raw,value=${{ github.sha }}
           labels: true
           annotations: true
       - name: Prepare Metadata (release tag)
