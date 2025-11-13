@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: 0xPolygon/x402-facilitator
+  IMAGE_NAME: 0xpolygon/x402-facilitator
 
 permissions:
   attestations: write
