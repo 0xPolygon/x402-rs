@@ -38,13 +38,17 @@ impl SolanaSenderWallet {
     fn fetch_mint(&self, mint_address: &SolanaAddress) -> Result<Mint, X402PaymentsError> {
         let mint_address: Pubkey = mint_address.clone().into();
         let account = self.rpc_client.get_account(&mint_address).map_err(|e| {
-            X402PaymentsError::SigningError(format!("failed to fetch mint {mint_address}: {e}"))
+            X402PaymentsError::SolanaMintFetch {
+                mint_address: mint_address.to_string(),
+                source: Box::new(e),
+            }
         })?;
         if account.owner == spl_token::id() {
             let mint = spl_token::state::Mint::unpack(&account.data).map_err(|e| {
-                X402PaymentsError::SigningError(format!(
-                    "failed to unpack mint {mint_address}: {e}"
-                ))
+                X402PaymentsError::SolanaMintUnpack {
+                    mint_address: mint_address.to_string(),
+                    source: Box::new(e),
+                }
             })?;
             Ok(Mint::Token {
                 decimals: mint.decimals,
@@ -52,18 +56,19 @@ impl SolanaSenderWallet {
             })
         } else if account.owner == spl_token_2022::id() {
             let mint = spl_token_2022::state::Mint::unpack(&account.data).map_err(|e| {
-                X402PaymentsError::SigningError(format!(
-                    "failed to unpack mint {mint_address}: {e}",
-                ))
+                X402PaymentsError::SolanaMintUnpack {
+                    mint_address: mint_address.to_string(),
+                    source: Box::new(e),
+                }
             })?;
             Ok(Mint::Token2022 {
                 decimals: mint.decimals,
                 token_program: spl_token_2022::id(),
             })
         } else {
-            Err(X402PaymentsError::SigningError(format!(
-                "failed to unpack mint {mint_address}: unknown owner"
-            )))
+            Err(X402PaymentsError::SolanaUnknownMintOwner {
+                mint_address: mint_address.to_string(),
+            })
         }
     }
 }
@@ -90,9 +95,10 @@ impl SenderWallet for SolanaSenderWallet {
         selected: PaymentRequirements,
     ) -> Result<PaymentPayload, X402PaymentsError> {
         let asset: SolanaAddress = selected.asset.clone().try_into().map_err(|e| {
-            X402PaymentsError::SigningError(format!(
-                "failed to convert asset to SolanaAddress: {e}"
-            ))
+            X402PaymentsError::SolanaAddressParse {
+                context: "asset".to_string(),
+                source: Box::new(e),
+            }
         })?;
         let mint = self.fetch_mint(&asset)?;
         // create the ATA (if needed)
@@ -103,20 +109,26 @@ impl SenderWallet for SolanaSenderWallet {
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .and_then(|s| s.parse::<Pubkey>().ok())
             .ok_or(X402PaymentsError::SigningError(
-                "failed to parse fee_payer".to_string(),
+                "feePayer missing or invalid in payment requirements".to_string(),
             ))?;
 
         // get the expected receiver's ATA
         // findAssociatedTokenPda
         let program_id = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
-            .map_err(|e| X402PaymentsError::SigningError(format!("{e}")))?;
+            .map_err(|e| X402PaymentsError::SolanaAddressParse {
+                context: "associated_token_program_id".to_string(),
+                source: Box::new(e),
+            })?;
         let asset_address: SolanaAddress = asset.clone();
         let asset_address: Pubkey = asset_address.into();
         let pay_to_address: SolanaAddress = selected
             .pay_to
             .clone()
             .try_into()
-            .map_err(|e| X402PaymentsError::SigningError(format!("{e}")))?;
+            .map_err(|e| X402PaymentsError::SolanaAddressParse {
+                context: "pay_to".to_string(),
+                source: Box::new(e),
+            })?;
         let pay_to_address: Pubkey = pay_to_address.into();
         let (ata, _) = Pubkey::find_program_address(
             // findAssociatedTokenPda
@@ -130,7 +142,10 @@ impl SenderWallet for SolanaSenderWallet {
         let ata_account = self
             .rpc_client
             .get_account_with_commitment(&ata, self.rpc_client.commitment())
-            .map_err(|e| X402PaymentsError::SigningError(format!("{e}")))?
+            .map_err(|e| X402PaymentsError::SolanaAccountFetch {
+                context: format!("destination_ata={}", ata),
+                source: Box::new(e),
+            })?
             .value;
         let create_ata_instruction = if ata_account.is_some() {
             None
@@ -165,7 +180,9 @@ impl SenderWallet for SolanaSenderWallet {
             .max_amount_required
             .0
             .try_into()
-            .map_err(|e| X402PaymentsError::SigningError(format!("{e}")))?;
+            .map_err(|e| {
+                X402PaymentsError::SigningError(format!("amount overflow: {e:?}"))
+            })?;
         let transfer_instruction = match mint {
             Mint::Token {
                 decimals,
@@ -181,7 +198,9 @@ impl SenderWallet for SolanaSenderWallet {
                     amount,
                     decimals,
                 )
-                .map_err(|e| X402PaymentsError::SigningError(format!("{e}")))?
+                .map_err(|e| X402PaymentsError::SolanaTransferInstruction {
+                    source: Box::new(e),
+                })?
             }
             Mint::Token2022 {
                 decimals,
@@ -197,7 +216,9 @@ impl SenderWallet for SolanaSenderWallet {
                     amount,
                     decimals,
                 )
-                .map_err(|e| X402PaymentsError::SigningError(format!("{e}")))?
+                .map_err(|e| X402PaymentsError::SolanaTransferInstruction {
+                    source: Box::new(e),
+                })?
             }
         };
         let transfer_instructions = if let Some(create_ata_instruction) = create_ata_instruction {
@@ -211,7 +232,9 @@ impl SenderWallet for SolanaSenderWallet {
         let recent_blockhash = self
             .rpc_client
             .get_latest_blockhash()
-            .map_err(|e| X402PaymentsError::SigningError(format!("{e:?}")))?;
+            .map_err(|e| X402PaymentsError::SolanaBlockhash {
+                source: Box::new(e),
+            })?;
         let fee = get_priority_fee_micro_lamports(
             self.rpc_client.as_ref(),
             &[fee_payer, destination_ata, source_ata],
@@ -228,8 +251,11 @@ impl SenderWallet for SolanaSenderWallet {
             let mut instructions = Vec::with_capacity(instructions_original.len() + 1);
             instructions.push(cu_ix);
             instructions.extend(instructions_original.clone());
-            MessageV0::try_compile(&fee_payer, &instructions, &[], recent_blockhash)
-                .map_err(|e| X402PaymentsError::SigningError(format!("{e:?}")))?
+            MessageV0::try_compile(&fee_payer, &instructions, &[], recent_blockhash).map_err(
+                |e| X402PaymentsError::SolanaMessageCompile {
+                    source: Box::new(e),
+                },
+            )?
         };
         let tx = VersionedTransaction {
             signatures: vec![],
@@ -238,10 +264,14 @@ impl SenderWallet for SolanaSenderWallet {
         let tx = TransactionInt::new(tx);
         let signed = tx
             .sign(self.keypair.as_ref())
-            .map_err(|e| X402PaymentsError::SigningError(format!("{e:?}")))?;
+            .map_err(|e| X402PaymentsError::SolanaTransactionSign {
+                source: Box::new(e),
+            })?;
         let tx_b64 = signed
             .as_base64()
-            .map_err(|e| X402PaymentsError::SigningError(format!("{e:?}")))?;
+            .map_err(|e| X402PaymentsError::SolanaTransactionEncode {
+                source: Box::new(e),
+            })?;
 
         let payment_payload = PaymentPayload {
             x402_version: X402Version::V1,
@@ -291,7 +321,9 @@ pub fn build_message_to_simulate(
         ixs_mod
     };
     let message = MessageV0::try_compile(&fee_payer, &with_cu_limit, &[], recent_blockhash)
-        .map_err(|e| X402PaymentsError::SigningError(format!("{e:?}")))?;
+        .map_err(|e| X402PaymentsError::SolanaMessageCompile {
+            source: Box::new(e),
+        })?;
     Ok((message, ixs))
 }
 
@@ -318,13 +350,13 @@ pub fn estimate_compute_units(
                 ..RpcSimulateTransactionConfig::default()
             },
         )
-        .map_err(|e| X402PaymentsError::SigningError(format!("{e:?}")))?;
+        .map_err(|e| X402PaymentsError::SolanaSimulation {
+            source: Box::new(e),
+        })?;
     let units = sim
         .value
         .units_consumed
-        .ok_or(X402PaymentsError::SigningError(
-            "simulation returned no units_consumed".to_string(),
-        ))?;
+        .ok_or(X402PaymentsError::SolanaSimulationNoUnits)?;
     Ok(units as u32)
 }
 
@@ -334,7 +366,9 @@ pub fn get_priority_fee_micro_lamports(
 ) -> Result<u64, X402PaymentsError> {
     let fee = rpc
         .get_recent_prioritization_fees(writeable_accounts)
-        .map_err(|e| X402PaymentsError::SigningError(format!("{e:?}")))?
+        .map_err(|e| X402PaymentsError::SolanaPriorityFee {
+            source: Box::new(e),
+        })?
         .iter()
         .filter(|e| e.prioritization_fee > 0)
         .map(|e| e.prioritization_fee)

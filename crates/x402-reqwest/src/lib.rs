@@ -25,11 +25,14 @@
 //! use x402_reqwest::{MaxTokenAmountFromAmount, X402Payments};
 //! use x402_rs::network::{Network, USDCDeployment};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let signer: PrivateKeySigner = "0x...".parse()?;
-//! X402Payments::with_signer(signer)
+//! X402Payments::with_wallet(signer)
 //!     // Example: prefer USDC on Base, and limit payments to 1.00 USDC
 //!     .prefer(USDCDeployment::by_network(Network::Base))
-//!     .max(USDCDeployment::by_network(Network::Base).amount("1.00")?)
+//!     .max(USDCDeployment::by_network(Network::Base).amount("1.00")?);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Examples
@@ -97,7 +100,7 @@
 //!     let signer: PrivateKeySigner = "0x...".parse()?;
 //!     let client = rqm::ClientBuilder::new(Client::new())
 //!         .with(
-//!             X402Payments::with_signer(signer)
+//!             X402Payments::with_wallet(signer)
 //!                 .prefer(USDCDeployment::by_network(Network::BaseSepolia))
 //!                 .max(USDCDeployment::by_network(Network::BaseSepolia).amount(0.1)?),
 //!         )

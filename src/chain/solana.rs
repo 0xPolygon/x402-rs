@@ -13,6 +13,7 @@ use std::time::Duration;
 use tracing_core::Level;
 
 use crate::chain::{FacilitatorLocalError, FromEnvByNetworkBuild, NetworkProviderOps};
+use crate::error::{ErrorContext, SolanaError};
 use crate::facilitator::Facilitator;
 use crate::from_env;
 use crate::network::Network;
@@ -377,7 +378,13 @@ impl SolanaProvider {
             .rpc_client
             .get_multiple_accounts(&[transfer_checked_instruction.source, ata])
             .await
-            .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e}")))?;
+            .map_err(|e| SolanaError::AccountLookup {
+                context: ErrorContext::with_details(
+                    "fetch transfer accounts",
+                    format!("source={}, destination={}", transfer_checked_instruction.source, ata),
+                ),
+                source: Box::new(e),
+            })?;
         let is_sender_missing = accounts.first().cloned().is_none_or(|a| a.is_none());
         if is_sender_missing {
             return Err(FacilitatorLocalError::DecodingError(
@@ -500,7 +507,10 @@ impl SolanaProvider {
             .rpc_client
             .simulate_transaction_with_config(&tx.inner, cfg)
             .await
-            .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e}")))?;
+            .map_err(|e| SolanaError::Simulation {
+                context: ErrorContext::new("simulate transaction"),
+                source: Box::new(e),
+            })?;
         if sim.value.err.is_some() {
             return Err(FacilitatorLocalError::DecodingError(
                 "invalid_exact_svm_payload_transaction_simulation_failed".to_string(),
@@ -704,7 +714,13 @@ impl TransactionInt {
         let msg_bytes = tx.message.serialize();
         let signature = keypair
             .try_sign_message(msg_bytes.as_slice())
-            .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e}")))?;
+            .map_err(|e| SolanaError::Signing {
+                context: ErrorContext::with_details(
+                    "sign transaction",
+                    format!("signer={}", keypair.pubkey()),
+                ),
+                source: Box::new(e),
+            })?;
         // Required signatures are the first N account keys
         let num_required = tx.message.header().num_required_signatures as usize;
         let static_keys = tx.message.static_account_keys();
@@ -734,7 +750,11 @@ impl TransactionInt {
                 },
             )
             .await
-            .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e}")))
+            .map_err(|e| SolanaError::TransactionSend {
+                context: ErrorContext::new("send transaction to cluster"),
+                source: Box::new(e),
+            })
+            .map_err(FacilitatorLocalError::from)
     }
 
     pub async fn send_and_confirm(
@@ -747,7 +767,13 @@ impl TransactionInt {
             let confirmed = rpc_client
                 .confirm_transaction_with_commitment(&tx_sig, commitment_config)
                 .await
-                .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e}")))?;
+                .map_err(|e| SolanaError::Rpc {
+                    context: ErrorContext::with_details(
+                        "confirm transaction",
+                        format!("tx_sig={}", tx_sig),
+                    ),
+                    source: Box::new(e),
+                })?;
             if confirmed.value {
                 return Ok(tx_sig);
             }

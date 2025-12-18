@@ -42,9 +42,11 @@ use tracing::{Instrument, instrument};
 use tracing_core::Level;
 
 use crate::chain::{FacilitatorLocalError, FromEnvByNetworkBuild, NetworkProviderOps};
+use crate::error::{ErrorContext, EvmError};
 use crate::facilitator::Facilitator;
 use crate::from_env;
 use crate::network::{Network, USDCDeployment};
+use crate::telemetry::RequestContext;
 use crate::timestamp::UnixTimestamp;
 use crate::types::{
     EvmAddress, EvmSignature, ExactPaymentPayload, FacilitatorErrorReason, HexEncodedNonce,
@@ -349,7 +351,13 @@ impl MetaEvmProvider for EvmProvider {
                 .get_gas_price()
                 .instrument(tracing::info_span!("get_gas_price"))
                 .await
-                .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e:?}")))?;
+                .map_err(|e| EvmError::GasPrice {
+                    context: ErrorContext::with_details(
+                        "fetch gas price",
+                        format!("network={}", self.chain.network),
+                    ),
+                    source: Box::new(e),
+                })?;
             txr.set_gas_price(gas);
         }
 
@@ -377,7 +385,7 @@ impl MetaEvmProvider for EvmProvider {
                     "resetting nonce cache due to transaction send failure"
                 );
                 self.nonce_manager.reset_nonce(from_address).await;
-                tracing::error!(
+                tracing::debug!(
                     event = "transaction_send_failed",
                     request_id = %request_id,
                     relayer = %from_address,
@@ -385,7 +393,14 @@ impl MetaEvmProvider for EvmProvider {
                     error = %e,
                     "failed to send transaction"
                 );
-                return Err(FacilitatorLocalError::ContractCall(format!("{e:?}")));
+                return Err(EvmError::TransactionSend {
+                    context: ErrorContext::with_details(
+                        "send transaction",
+                        format!("network={}, relayer={}", self.chain.network, from_address),
+                    ),
+                    source: Box::new(e),
+                }
+                .into());
             }
         };
 
@@ -430,7 +445,7 @@ impl MetaEvmProvider for EvmProvider {
                     "resetting nonce cache due to receipt fetch failure"
                 );
                 self.nonce_manager.reset_nonce(from_address).await;
-                tracing::error!(
+                tracing::debug!(
                     event = "transaction_receipt_failed",
                     request_id = %request_id,
                     relayer = %from_address,
@@ -439,7 +454,14 @@ impl MetaEvmProvider for EvmProvider {
                     error = %e,
                     "failed to get transaction receipt"
                 );
-                Err(FacilitatorLocalError::ContractCall(format!("{e:?}")))
+                Err(EvmError::ReceiptFetch {
+                    context: ErrorContext::with_details(
+                        "fetch transaction receipt",
+                        format!("network={}, tx_hash={}", self.chain.network, tx_hash),
+                    ),
+                    source: Box::new(e),
+                }
+                .into())
             }
         }
     }
@@ -546,16 +568,34 @@ where
                             otel.kind = "client",
                     ))
                     .await
-                    .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e:?}")))?;
+                    .map_err(|e| EvmError::ContractCall {
+                        context: ErrorContext::with_details(
+                            "EIP-6492 multicall verification",
+                            format!("from={}, to={}", transfer_call.from, transfer_call.to),
+                        ),
+                        source: Box::new(e),
+                    })?;
                 let is_valid_signature_result = is_valid_signature_result
-                    .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e:?}")))?;
+                    .map_err(|e| EvmError::SignatureProcessing {
+                        context: ErrorContext::with_details(
+                            "EIP-6492 signature validation",
+                            format!("signer={}", payer),
+                        ),
+                        source: Box::new(e),
+                    })?;
                 if !is_valid_signature_result {
                     return Err(FacilitatorLocalError::InvalidSignature(
                         payer.into(),
                         "Incorrect signature".to_string(),
                     ));
                 }
-                transfer_result.map_err(|e| FacilitatorLocalError::ContractCall(format!("{e}")))?;
+                transfer_result.map_err(|e| EvmError::ContractCall {
+                    context: ErrorContext::with_details(
+                        "EIP-6492 transfer simulation",
+                        format!("from={}, to={}, value={}", transfer_call.from, transfer_call.to, transfer_call.value),
+                    ),
+                    source: Box::new(e),
+                })?;
             }
             StructuredSignature::EIP1271(signature) => {
                 // It is EOA or EIP-1271 signature, which we can pass to the transfer simulation
@@ -577,7 +617,13 @@ where
                             otel.kind = "client",
                     ))
                     .await
-                    .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e:?}")))?;
+                    .map_err(|e| EvmError::ContractCall {
+                        context: ErrorContext::with_details(
+                            "EIP-1271 transfer simulation",
+                            format!("from={}, to={}, value={}", transfer_call.from, transfer_call.to, transfer_call.value),
+                        ),
+                        source: Box::new(e),
+                    })?;
             }
         }
 
@@ -829,7 +875,13 @@ async fn assert_enough_balance<P: Provider>(
             otel.kind = "client"
         ))
         .await
-        .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e:?}")))?;
+        .map_err(|e| EvmError::BalanceQuery {
+            context: ErrorContext::with_details(
+                "fetch token balance",
+                format!("token={}, sender={}", usdc_contract.address(), sender),
+            ),
+            source: Box::new(e),
+        })?;
 
     if balance < max_amount_required {
         Err(FacilitatorLocalError::InsufficientFunds((*sender).into()))
@@ -880,7 +932,13 @@ async fn is_contract_deployed<P: Provider>(
             otel.kind = "client",
         ))
         .await
-        .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e:?}")))?;
+        .map_err(|e| EvmError::CodeCheck {
+            context: ErrorContext::with_details(
+                "check contract deployment",
+                format!("address={}", address),
+            ),
+            source: Box::new(e),
+        })?;
     Ok(!bytes.is_empty())
 }
 
@@ -932,7 +990,13 @@ async fn assert_domain<P: Provider>(
                 otel.kind = "client",
             ))
             .await
-            .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e:?}")))?
+            .map_err(|e| EvmError::DomainResolution {
+                context: ErrorContext::with_details(
+                    "fetch EIP-712 version",
+                    format!("token={}", token_contract.address()),
+                ),
+                source: Box::new(e),
+            })?
     };
     let domain = eip712_domain! {
         name: name,
@@ -1202,9 +1266,13 @@ impl TryFrom<Vec<u8>> for StructuredSignature {
         let signature = if is_eip6492 {
             let body = &bytes[..bytes.len() - 32];
             let sig6492 = Sig6492::abi_decode_params(body).map_err(|e| {
-                FacilitatorLocalError::ContractCall(format!(
-                    "Failed to decode EIP6492 signature: {e}"
-                ))
+                EvmError::SignatureProcessing {
+                    context: ErrorContext::with_details(
+                        "decode EIP-6492 signature",
+                        format!("signature_length={}", bytes.len()),
+                    ),
+                    source: Box::new(e),
+                }
             })?;
             StructuredSignature::EIP6492 {
                 factory: sig6492.factory,
@@ -1294,7 +1362,13 @@ impl PendingNonceManager {
         if let Some(nonce_lock) = self.nonces.get(&address) {
             let mut nonce = nonce_lock.lock().await;
             *nonce = u64::MAX; // NONE sentinel - will trigger fresh query
-            tracing::debug!(%address, "reset nonce cache, will requery on next use");
+            // Use request context for correlation when available
+            let request_id = RequestContext::request_id_or_unknown();
+            tracing::debug!(
+                %address,
+                request_id = %request_id,
+                "reset nonce cache, will requery on next use"
+            );
         }
     }
 }
@@ -1384,13 +1458,18 @@ mod tests {
         let address2 = address!("0000000000000000000000000000000000000002");
 
         // Set nonces for both addresses
+        // Note: Each entry operation must be in its own scope to avoid deadlock.
+        // DashMap's entry() returns a RefMut that holds a shard lock, and holding
+        // multiple RefMuts simultaneously (even for different keys) can deadlock
+        // if the keys hash to the same shard.
         {
             let nonce_lock1 = manager
                 .nonces
                 .entry(address1)
                 .or_insert_with(|| Arc::new(Mutex::new(0)));
             *nonce_lock1.lock().await = 10;
-
+        }
+        {
             let nonce_lock2 = manager
                 .nonces
                 .entry(address2)
@@ -1402,10 +1481,12 @@ mod tests {
         manager.reset_nonce(address1).await;
 
         // address1 should be reset, address2 should be unchanged
+        // Note: Same scoping rule applies to get() - it returns a Ref that holds a read lock
         {
             let nonce_lock1 = manager.nonces.get(&address1).unwrap();
             assert_eq!(*nonce_lock1.lock().await, u64::MAX);
-
+        }
+        {
             let nonce_lock2 = manager.nonces.get(&address2).unwrap();
             assert_eq!(*nonce_lock2.lock().await, 20);
         }

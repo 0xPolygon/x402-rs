@@ -722,6 +722,30 @@ impl Display for MixedAddress {
     }
 }
 
+impl std::str::FromStr for MixedAddress {
+    type Err = MixedAddressError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // 1) EVM address (0x prefix, 40 hex chars)
+        if let Ok(addr) = EvmAddress::from_str(s) {
+            return Ok(MixedAddress::Evm(addr));
+        }
+        // 2) Solana Pubkey (base58, 32 bytes)
+        if let Ok(pk) = Pubkey::from_str(s) {
+            return Ok(MixedAddress::Solana(pk));
+        }
+        Err(MixedAddressError::InvalidAddressFormat)
+    }
+}
+
+impl TryFrom<&str> for MixedAddress {
+    type Error = MixedAddressError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
 impl<'de> Deserialize<'de> for MixedAddress {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1065,10 +1089,57 @@ impl<'de> Deserialize<'de> for VerifyResponse {
 
 /// A simple error structure returned on unexpected or fatal server errors.
 /// Used when no structured protocol-level response is appropriate.
+#[allow(dead_code)] // Part of public API for backward compatibility
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+/// Structured error response for API clients with detailed error information.
+///
+/// This format provides machine-readable error details for client retry logic
+/// and better debugging information.
+///
+/// # Example Response
+///
+/// ```json
+/// {
+///   "error": {
+///     "code": "EVM_TRANSPORT_ERROR",
+///     "message": "Network connection failed while fetching gas price",
+///     "category": "network",
+///     "transient": true,
+///     "retryAfterMs": 1000
+///   },
+///   "requestId": "abc123"
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuredErrorResponse {
+    /// Detailed error information.
+    pub error: ErrorDetails,
+    /// Request ID for log correlation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+/// Detailed error information for client consumption.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorDetails {
+    /// Machine-readable error code (e.g., "EVM_TRANSPORT_ERROR").
+    pub code: String,
+    /// Human-readable error message.
+    pub message: String,
+    /// Error category for client handling strategy.
+    pub category: String,
+    /// Whether this error is transient (retry may help).
+    pub transient: bool,
+    /// Suggested retry delay in milliseconds (if transient).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 /// Contains bytes of base64 encoded some other bytes.

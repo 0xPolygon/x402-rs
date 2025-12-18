@@ -79,9 +79,12 @@ impl SenderWallet for EvmSenderWallet {
             }
         };
         let network = selected.network;
-        let evm_chain: EvmChain = network
-            .try_into()
-            .map_err(|e| X402PaymentsError::SigningError(format!("{e:?}")))?;
+        let evm_chain: EvmChain = network.try_into().map_err(|e| {
+            X402PaymentsError::EvmChainConversion {
+                context: format!("network={:?}", network),
+                source: Box::new(e),
+            }
+        })?;
         let chain_id = evm_chain.chain_id;
         let domain = eip712_domain! {
             name: name.unwrap_or("".to_string()),
@@ -119,7 +122,9 @@ impl SenderWallet for EvmSenderWallet {
             .signer
             .sign_hash(&eip712_hash)
             .await
-            .map_err(|e| X402PaymentsError::SigningError(format!("{e:?}")))?;
+            .map_err(|e| X402PaymentsError::EvmSigning {
+                source: Box::new(e),
+            })?;
         #[cfg(feature = "telemetry")]
         tracing::debug!(?signature, "Signature obtained");
         let payment_payload = PaymentPayload {

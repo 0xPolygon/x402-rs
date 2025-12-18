@@ -5,15 +5,16 @@
 //!
 //! ```rust,no_run
 //! use reqwest::Client;
-//! use x402_reqwest::{ReqwestWithPayments, ReqwestWithPaymentsBuild};
+//! use x402_reqwest::{ReqwestWithPayments, ReqwestWithPaymentsBuild, MaxTokenAmountFromAmount};
 //! use alloy::signers::local::PrivateKeySigner;
+//! use x402_rs::network::{Network, USDCDeployment};
 //!
-//! let signer: PrivateKeySigner = "...".parse().unwrap();
+//! let signer: PrivateKeySigner = "0x...".parse().unwrap();
 //!
 //! let client: reqwest_middleware::ClientWithMiddleware = Client::new()
 //!     .with_payments(signer)
-//!     .prefer(...)
-//!     .max(...)
+//!     .prefer(USDCDeployment::by_network(Network::Base))
+//!     .max(USDCDeployment::by_network(Network::Base).amount("1.00").unwrap())
 //!     .build();
 //! ```
 

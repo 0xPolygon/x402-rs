@@ -99,6 +99,7 @@ pub enum X402PaymentsError {
     #[error("Failed to get system clock")]
     ClockError(#[source] SystemTimeError),
     /// Indicates that signing the EIP-712 payment payload failed using the provided signer.
+    /// Use this variant for simple string error messages without an underlying cause.
     #[error("Failed to sign payment payload: {0}")]
     SigningError(String),
     /// Occurs if the constructed payment payload cannot be serialized to JSON.
@@ -109,6 +110,101 @@ pub enum X402PaymentsError {
     /// Typically caused by invalid characters or excessive length.
     #[error("Failed to encode payment payload to HTTP header")]
     HeaderValueEncodeError(#[source] http::header::InvalidHeaderValue),
+
+    // ===== EVM-specific errors with proper error chaining =====
+
+    /// Raised when a network cannot be converted to an EVM chain.
+    #[error("Failed to convert network to EVM chain: {context}")]
+    EvmChainConversion {
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Raised when EIP-712 signing fails.
+    #[error("Failed to sign EIP-712 payload")]
+    EvmSigning {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    // ===== Solana-specific errors with proper error chaining =====
+
+    /// Raised when fetching a Solana mint account fails.
+    #[error("Failed to fetch Solana mint: {mint_address}")]
+    SolanaMintFetch {
+        mint_address: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Raised when unpacking a Solana mint account fails.
+    #[error("Failed to unpack Solana mint: {mint_address}")]
+    SolanaMintUnpack {
+        mint_address: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Raised when a Solana mint has an unknown token program owner.
+    #[error("Unknown Solana mint owner for: {mint_address}")]
+    SolanaUnknownMintOwner { mint_address: String },
+    /// Raised when parsing a Solana address fails.
+    #[error("Failed to parse Solana address: {context}")]
+    SolanaAddressParse {
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Raised when fetching a Solana account fails.
+    #[error("Failed to fetch Solana account: {context}")]
+    SolanaAccountFetch {
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Raised when creating a Solana transfer instruction fails.
+    #[error("Failed to create Solana transfer instruction")]
+    SolanaTransferInstruction {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Raised when fetching the Solana blockhash fails.
+    #[error("Failed to get Solana blockhash")]
+    SolanaBlockhash {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Raised when compiling a Solana message fails.
+    #[error("Failed to compile Solana message")]
+    SolanaMessageCompile {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Raised when signing a Solana transaction fails.
+    #[error("Failed to sign Solana transaction")]
+    SolanaTransactionSign {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Raised when encoding a Solana transaction fails.
+    #[error("Failed to encode Solana transaction")]
+    SolanaTransactionEncode {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Raised when simulating a Solana transaction fails.
+    #[error("Failed to simulate Solana transaction")]
+    SolanaSimulation {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Raised when simulation returns no compute units consumed.
+    #[error("Solana simulation returned no units_consumed")]
+    SolanaSimulationNoUnits,
+    /// Raised when fetching Solana priority fees fails.
+    #[error("Failed to get Solana priority fee")]
+    SolanaPriorityFee {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl From<X402PaymentsError> for rqm::Error {
