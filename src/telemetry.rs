@@ -11,12 +11,113 @@ use opentelemetry_semantic_conventions::{
     attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
 };
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::env;
 use std::time::Duration;
 use tower_http::trace::{MakeSpan, OnRequest, OnResponse, TraceLayer};
 use tracing::Span;
 use tracing_opentelemetry::{MetricsLayer, OpenTelemetryLayer, OpenTelemetrySpanExt};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+
+// ============================================================================
+// Request Context Propagation
+// ============================================================================
+
+thread_local! {
+    static REQUEST_CONTEXT: RefCell<Option<RequestContext>> = const { RefCell::new(None) };
+}
+
+/// Request context for propagating correlation data through chain operations.
+///
+/// This struct provides a way to pass request-scoped metadata (like request_id,
+/// network, payer, and operation type) through the call stack without passing
+/// it explicitly as function parameters.
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// use x402_rs::telemetry::{RequestContext, RequestContextGuard};
+///
+/// // In a handler, set the context
+/// RequestContext::set(RequestContext {
+///     request_id: "abc123".to_string(),
+///     network: Some("base-sepolia".to_string()),
+///     payer: None,
+///     operation: "verify",
+/// });
+/// let _guard = RequestContextGuard; // Clears context when dropped
+///
+/// // In chain code, retrieve the context
+/// if let Some(ctx) = RequestContext::current() {
+///     tracing::debug!(request_id = %ctx.request_id, "executing RPC call");
+/// }
+/// ```
+#[allow(dead_code)] // Fields are part of public API for downstream/debugging use
+#[derive(Debug, Clone)]
+pub struct RequestContext {
+    /// Unique identifier for correlating logs across a single request.
+    pub request_id: String,
+    /// The blockchain network being operated on (e.g., "base-sepolia").
+    pub network: Option<String>,
+    /// The payer address if known.
+    pub payer: Option<String>,
+    /// The type of operation being performed ("verify" or "settle").
+    pub operation: &'static str,
+}
+
+impl RequestContext {
+    /// Retrieves the current request context, if set.
+    ///
+    /// Returns `None` if no context has been set for the current thread.
+    pub fn current() -> Option<RequestContext> {
+        REQUEST_CONTEXT.with(|ctx| ctx.borrow().clone())
+    }
+
+    /// Sets the request context for the current thread.
+    ///
+    /// This should be called at the beginning of a request handler.
+    /// Use [`RequestContextGuard`] to automatically clear the context
+    /// when the request completes.
+    pub fn set(ctx: RequestContext) {
+        REQUEST_CONTEXT.with(|c| *c.borrow_mut() = Some(ctx));
+    }
+
+    /// Clears the request context for the current thread.
+    ///
+    /// This is automatically called by [`RequestContextGuard::drop`].
+    pub fn clear() {
+        REQUEST_CONTEXT.with(|c| *c.borrow_mut() = None);
+    }
+
+    /// Returns the request_id if context is set, otherwise "unknown".
+    ///
+    /// This is a convenience method for logging when you want a request_id
+    /// but don't need the full context.
+    pub fn request_id_or_unknown() -> String {
+        Self::current()
+            .map(|ctx| ctx.request_id)
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+/// RAII guard that clears the request context when dropped.
+///
+/// Use this in request handlers to ensure the context is always cleaned up,
+/// even if the handler returns early or panics.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// RequestContext::set(RequestContext { ... });
+/// let _guard = RequestContextGuard; // Context cleared when _guard goes out of scope
+/// ```
+pub struct RequestContextGuard;
+
+impl Drop for RequestContextGuard {
+    fn drop(&mut self) {
+        RequestContext::clear();
+    }
+}
 
 /// Extracts or generates a request correlation ID from the current span context.
 ///

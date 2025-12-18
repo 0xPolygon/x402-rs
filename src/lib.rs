@@ -9,6 +9,7 @@
 //! - _Buyer_: a client that constructs and submits x402-compliant payments
 //!
 //! Modules:
+//! - [`error`] — structured error types for chain operations.
 //! - [`facilitator`] — defines the [`facilitator::Facilitator`] trait used to validate and settle x402 payments.
 //! - [`facilitator_local`] — a concrete implementation of [`facilitator::Facilitator`].
 //! - [`network`] — enumerates supported Ethereum-compatible networks and known token deployments.
@@ -17,6 +18,7 @@
 //! - [`types`] — all shared x402 protocol structures and payload formats.
 
 pub mod chain;
+pub mod error;
 pub mod facilitator;
 pub mod facilitator_local;
 pub mod from_env;

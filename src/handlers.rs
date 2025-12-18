@@ -17,11 +17,14 @@ use axum::{Json, Router, response::IntoResponse};
 use serde_json::json;
 use tracing::instrument;
 
+use std::fmt::Debug;
+
 use crate::chain::FacilitatorLocalError;
 use crate::facilitator::Facilitator;
+use crate::telemetry::{RequestContext, RequestContextGuard};
 use crate::types::{
-    ErrorResponse, FacilitatorErrorReason, MixedAddress, SettleRequest, VerifyRequest,
-    VerifyResponse,
+    ErrorDetails, FacilitatorErrorReason, MixedAddress, SettleRequest, StructuredErrorResponse,
+    VerifyRequest, VerifyResponse,
 };
 
 /// `GET /verify`: Returns a machine-readable description of the `/verify` endpoint.
@@ -61,7 +64,7 @@ pub async fn get_settle_info() -> impl IntoResponse {
 pub fn routes<A>() -> Router<A>
 where
     A: Facilitator + Clone + Send + Sync + 'static,
-    A::Error: IntoResponse,
+    A::Error: IntoResponse + std::error::Error,
 {
     Router::new()
         .route("/", get(get_root))
@@ -118,13 +121,22 @@ pub async fn post_verify<A>(
 ) -> impl IntoResponse
 where
     A: Facilitator,
-    A::Error: IntoResponse,
+    A::Error: IntoResponse + std::error::Error,
 {
     let request_id = crate::telemetry::get_request_id();
 
     // Extract key business data for logging
     let network = body.payment_payload.network.to_string();
     let scheme = body.payment_payload.scheme.to_string();
+
+    // Set request context for downstream chain operations
+    RequestContext::set(RequestContext {
+        request_id: request_id.clone(),
+        network: Some(network.clone()),
+        payer: None,
+        operation: "verify",
+    });
+    let _guard = RequestContextGuard; // Clears context when handler returns
 
     tracing::info!(
         event = "verify_start",
@@ -151,12 +163,13 @@ where
             (StatusCode::OK, Json(valid_response)).into_response()
         }
         Err(error) => {
-            tracing::warn!(
-                event = "verify_error",
-                request_id = %request_id,
-                network = %network,
-                error = ?error,
-                "verification encountered error"
+            // Log with DataDog-compatible error format
+            log_error_datadog(
+                "verify_error",
+                &request_id,
+                &error,
+                Some(&network),
+                None,
             );
             error.into_response()
         }
@@ -176,7 +189,7 @@ pub async fn post_settle<A>(
 ) -> impl IntoResponse
 where
     A: Facilitator,
-    A::Error: IntoResponse,
+    A::Error: IntoResponse + std::error::Error,
 {
     let request_id = crate::telemetry::get_request_id();
 
@@ -191,6 +204,15 @@ where
         ),
         crate::types::ExactPaymentPayload::Solana(_) => (None, None, None),
     };
+
+    // Set request context for downstream chain operations
+    RequestContext::set(RequestContext {
+        request_id: request_id.clone(),
+        network: Some(network.clone()),
+        payer: payer.clone(),
+        operation: "settle",
+    });
+    let _guard = RequestContextGuard; // Clears context when handler returns
 
     tracing::info!(
         event = "settle_start",
@@ -219,15 +241,13 @@ where
             (StatusCode::OK, Json(valid_response)).into_response()
         }
         Err(error) => {
-            tracing::warn!(
-                event = "settle_error",
-                request_id = %request_id,
-                payer = ?payer,
-                payee = ?payee,
-                network = %network,
-                amount = ?amount,
-                error = ?error,
-                "settlement encountered error"
+            // Log with DataDog-compatible error format
+            log_error_datadog(
+                "settle_error",
+                &request_id,
+                &error,
+                Some(&network),
+                payer.as_deref(),
             );
             error.into_response()
         }
@@ -238,17 +258,116 @@ fn invalid_schema(payer: Option<MixedAddress>) -> VerifyResponse {
     VerifyResponse::invalid(payer, FacilitatorErrorReason::InvalidScheme)
 }
 
+/// Log an error with DataDog-compatible error format.
+///
+/// This logs errors in a format that DataDog Error Tracking can parse,
+/// including `error.kind`, `error.message`, and `error.stack` fields.
+///
+/// Works with any error type that implements `Debug` and `std::error::Error`.
+fn log_error_datadog<E: Debug + std::error::Error>(
+    event: &str,
+    request_id: &str,
+    error: &E,
+    network: Option<&str>,
+    payer: Option<&str>,
+) {
+    // Build error kind from type name
+    let error_kind = std::any::type_name::<E>();
+
+    // Build error message with full chain
+    let error_message = build_generic_error_chain(error);
+
+    // Build stack trace from error chain
+    let error_stack = build_generic_error_stack(error);
+
+    tracing::error!(
+        event = %event,
+        request_id = %request_id,
+        network = ?network,
+        payer = ?payer,
+        error.kind = %error_kind,
+        error.message = %error_message,
+        error.stack = %error_stack,
+        "{}",
+        error_message
+    );
+}
+
+/// Build a complete error message by traversing the error chain.
+fn build_generic_error_chain<E: std::error::Error>(error: &E) -> String {
+    let mut messages = vec![error.to_string()];
+    let mut current: &dyn std::error::Error = error;
+
+    while let Some(source) = current.source() {
+        messages.push(source.to_string());
+        current = source;
+    }
+
+    messages.join(": ")
+}
+
+/// Build a stack trace from the error chain for DataDog Error Tracking.
+///
+/// DataDog requires at least 2 lines with 1 meaningful frame for error tracking.
+fn build_generic_error_stack<E: std::error::Error>(error: &E) -> String {
+    let mut frames = Vec::new();
+
+    // Add frame for the top-level error
+    frames.push(format!(
+        "  at {} (facilitator)",
+        std::any::type_name::<E>()
+    ));
+
+    // Add frames for each error in the chain
+    let mut current: &dyn std::error::Error = error;
+    let mut depth = 1;
+
+    while let Some(source) = current.source() {
+        let frame = format!(
+            "  at caused_by[{}]: {} (chain)",
+            depth,
+            truncate_message(&source.to_string(), 100)
+        );
+        frames.push(frame);
+        current = source;
+        depth += 1;
+    }
+
+    // Ensure at least 2 lines for DataDog
+    if frames.len() < 2 {
+        frames.push("  at <no additional context>".to_string());
+    }
+
+    format!("Error: {}\n{}", error, frames.join("\n"))
+}
+
+/// Truncate a message to a maximum length, adding ellipsis if needed.
+fn truncate_message(msg: &str, max_len: usize) -> String {
+    if msg.len() <= max_len {
+        msg.to_string()
+    } else {
+        format!("{}...", &msg[..max_len - 3])
+    }
+}
+
 impl IntoResponse for FacilitatorLocalError {
     fn into_response(self) -> Response {
         let error = self;
 
-        let bad_request = (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid request".to_string(),
-            }),
-        )
-            .into_response();
+        // Helper to build a structured error response
+        let make_structured_error = |err: &FacilitatorLocalError| -> StructuredErrorResponse {
+            let is_transient = err.is_transient();
+            StructuredErrorResponse {
+                error: ErrorDetails {
+                    code: err.error_code().to_string(),
+                    message: err.to_string(),
+                    category: format!("{:?}", err.category()).to_lowercase(),
+                    transient: is_transient,
+                    retry_after_ms: if is_transient { Some(1000) } else { None },
+                },
+                request_id: None, // Request ID not available in IntoResponse context
+            }
+        };
 
         match error {
             FacilitatorLocalError::SchemeMismatch(payer, ..) => {
@@ -269,9 +388,6 @@ impl IntoResponse for FacilitatorLocalError {
                 )),
             )
                 .into_response(),
-            FacilitatorLocalError::ContractCall(..)
-            | FacilitatorLocalError::InvalidAddress(..)
-            | FacilitatorLocalError::ClockError(_) => bad_request,
             FacilitatorLocalError::DecodingError(reason) => (
                 StatusCode::OK,
                 Json(VerifyResponse::invalid(
@@ -288,6 +404,24 @@ impl IntoResponse for FacilitatorLocalError {
                 )),
             )
                 .into_response(),
+            // Chain errors and internal errors return structured error responses
+            ref err @ FacilitatorLocalError::Evm(_)
+            | ref err @ FacilitatorLocalError::Solana(_) => {
+                // Use 502 Bad Gateway for upstream chain errors
+                (StatusCode::BAD_GATEWAY, Json(make_structured_error(err))).into_response()
+            }
+            ref err @ FacilitatorLocalError::ContractCall(..)
+            | ref err @ FacilitatorLocalError::InvalidAddress(..) => {
+                (StatusCode::BAD_REQUEST, Json(make_structured_error(err))).into_response()
+            }
+            ref err @ FacilitatorLocalError::ClockError(_) => {
+                // Internal server error for clock issues
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(make_structured_error(err)),
+                )
+                    .into_response()
+            }
         }
     }
 }
