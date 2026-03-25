@@ -1,0 +1,15 @@
+{
+  "chains": {
+    "eip155:$CHAIN_ID": {
+      "eip1559": true,
+      "signers": "$EVM_PRIVATE_KEY",
+      "rpc": [
+        { "http": "$CHAIN_RPC_URL" }
+      ]
+    }
+  },
+  "schemes": [
+    { "id": "v1-eip155-exact", "chains": "eip155:*" },
+    { "id": "v2-eip155-exact", "chains": "eip155:*" }
+  ]
+}
