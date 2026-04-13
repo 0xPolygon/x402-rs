@@ -23,9 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /app
 
 COPY --from=builder /app/target/release/x402-facilitator /usr/local/bin/x402-facilitator
-COPY config.json /app/config.json
 
 EXPOSE $PORT
 ENV RUST_LOG=info
 
-ENTRYPOINT ["x402-facilitator", "--config", "/app/config.json"]
+ENTRYPOINT ["x402-facilitator"]

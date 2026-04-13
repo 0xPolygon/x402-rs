@@ -32,8 +32,12 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::ops::Deref;
-use x402_types::chain::ChainId;
+use url::Url;
+use x402_types::chain::{ChainId, ChainIdPattern};
+use x402_types::config::{config_defaults, LiteralOrEnv};
+use x402_types::scheme::SchemeConfig;
 
 #[cfg(feature = "chain-aptos")]
 use x402_chain_aptos::chain as aptos;
@@ -203,4 +207,84 @@ impl<'de> Deserialize<'de> for ChainsConfig {
 
         deserializer.deserialize_map(ChainsVisitor)
     }
+}
+
+// ============================================================================
+// Environment variable configuration (Polygon PoS only)
+// ============================================================================
+
+/// Build configuration entirely from environment variables.
+///
+/// Required: `CHAIN_ID`, `CHAIN_RPC_URL`, `EVM_PRIVATE_KEY`
+/// Optional: `HOST` (default 0.0.0.0), `PORT` (default 8080)
+pub fn config_from_env() -> Result<Config, Box<dyn std::error::Error>> {
+        use x402_chain_eip155::chain::config::{
+            Eip155ChainConfig, Eip155ChainConfigInner, EvmPrivateKey, RpcConfig,
+        };
+        use x402_chain_eip155::chain::Eip155ChainReference;
+
+        let chain_id_str = env::var("CHAIN_ID")
+            .map_err(|_| "CHAIN_ID environment variable is required")?;
+        let chain_id: u64 = chain_id_str
+            .parse()
+            .map_err(|_| format!("CHAIN_ID must be numeric, got: {}", chain_id_str))?;
+
+        let rpc_url_str = env::var("CHAIN_RPC_URL")
+            .map_err(|_| "CHAIN_RPC_URL environment variable is required")?;
+        let rpc_url: Url = rpc_url_str
+            .parse()
+            .map_err(|e| format!("CHAIN_RPC_URL is not a valid URL: {}", e))?;
+
+        let private_keys_str = env::var("EVM_PRIVATE_KEY")
+            .map_err(|_| "EVM_PRIVATE_KEY environment variable is required")?;
+        let signers: Vec<LiteralOrEnv<EvmPrivateKey>> = private_keys_str
+            .split(',')
+            .map(|k| k.trim())
+            .filter(|k| !k.is_empty())
+            .map(|k| {
+                k.parse::<EvmPrivateKey>()
+                    .map(LiteralOrEnv::from_literal)
+                    .map_err(|e| format!("Invalid private key: {}", e))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if signers.is_empty() {
+            return Err("EVM_PRIVATE_KEY must contain at least one valid key".into());
+        }
+
+        let chain_config = ChainConfig::Eip155(Box::new(Eip155ChainConfig {
+            chain_reference: Eip155ChainReference::new(chain_id),
+            inner: Eip155ChainConfigInner {
+                eip1559: true,
+                flashblocks: false,
+                signers,
+                rpc: vec![RpcConfig {
+                    http: LiteralOrEnv::from_literal(rpc_url),
+                    rate_limit: None,
+                }],
+                receipt_timeout_secs: 30,
+            },
+        }));
+
+        let schemes = vec![
+            SchemeConfig {
+                enabled: true,
+                id: "v1-eip155-exact".to_string(),
+                chains: ChainIdPattern::wildcard("eip155"),
+                config: None,
+            },
+            SchemeConfig {
+                enabled: true,
+                id: "v2-eip155-exact".to_string(),
+                chains: ChainIdPattern::wildcard("eip155"),
+                config: None,
+            },
+        ];
+
+        Ok(x402_types::config::Config::new(
+            config_defaults::default_port(),
+            config_defaults::default_host(),
+            ChainsConfig(vec![chain_config]),
+            schemes,
+        ))
 }

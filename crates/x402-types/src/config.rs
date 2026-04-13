@@ -248,6 +248,11 @@ pub mod config_defaults {
 }
 
 impl<TChainsConfig> Config<TChainsConfig> {
+    /// Construct a Config programmatically (without serde deserialization).
+    pub fn new(port: u16, host: IpAddr, chains: TChainsConfig, schemes: Vec<SchemeConfig>) -> Self {
+        Self { port, host, chains, schemes }
+    }
+
     /// Get the port value.
     pub fn port(&self) -> u16 {
         self.port
