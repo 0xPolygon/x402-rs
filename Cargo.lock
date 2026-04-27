@@ -13478,6 +13478,7 @@ dependencies = [
  "tokio",
  "tower-http",
  "tracing",
+ "url",
  "x402-chain-aptos",
  "x402-chain-eip155",
  "x402-chain-solana",

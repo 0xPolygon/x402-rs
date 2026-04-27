@@ -49,7 +49,7 @@ use x402_chain_solana::{V1SolanaExact, V2SolanaExact};
 #[cfg(feature = "telemetry")]
 use x402_facilitator_local::util::Telemetry;
 
-use crate::config::Config;
+use crate::config::{Config, config_from_env};
 
 /// Initializes the x402 facilitator server.
 ///
@@ -76,7 +76,26 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         telemetry.http_tracing()
     };
 
-    let config = Config::load()?;
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(x402_types::config::ConfigError::FileRead(ref path, ref io_err))
+            if io_err.kind() == std::io::ErrorKind::NotFound =>
+        {
+            #[cfg(feature = "telemetry")]
+            tracing::info!(
+                config_path = %path.display(),
+                "Config file not found; loading facilitator config from environment"
+            );
+            config_from_env().map_err(|e| {
+                format!(
+                    "Config file not found at {} and env var fallback failed: {}",
+                    path.display(),
+                    e
+                )
+            })?
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     let chain_registry = ChainRegistry::from_config(config.chains()).await?;
     let scheme_blueprints = {
