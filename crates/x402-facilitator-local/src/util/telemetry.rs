@@ -59,8 +59,8 @@ use opentelemetry_semantic_conventions::{
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::time::Duration;
-use tower_http::trace::{MakeSpan, OnResponse, TraceLayer};
-use tracing::{Span, Level};
+use tower_http::trace::{MakeSpan, OnRequest, OnResponse, TraceLayer};
+use tracing::{Level, Span};
 use tracing_opentelemetry::{MetricsLayer, OpenTelemetryLayer, OpenTelemetrySpanExt};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -348,7 +348,13 @@ impl Telemetry {
                     // per-layer filtering to target the telemetry layer specifically,
                     // e.g. by target matching.
                     .with(tracing_subscriber::filter::LevelFilter::INFO)
-                    .with(tracing_subscriber::fmt::layer())
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .json()
+                            .with_ansi(false)
+                            .with_current_span(true)
+                            .with_span_list(true),
+                    )
                     .with(MetricsLayer::new(meter_provider.clone()))
                     .with(OpenTelemetryLayer::new(tracer))
                     .init();
@@ -366,8 +372,17 @@ impl Telemetry {
                 let default_level = self.default_level;
                 // Fallback: just use local logging
                 tracing_subscriber::registry()
-                    .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| default_level.to_string().into()))
-                    .with(tracing_subscriber::fmt::layer())
+                    .with(
+                        EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| default_level.to_string().into()),
+                    )
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .json()
+                            .with_ansi(false)
+                            .with_current_span(true)
+                            .with_span_list(true),
+                    )
                     .init();
 
                 if self.otel_warning {
@@ -439,11 +454,12 @@ impl TelemetryProviders {
     ) -> TraceLayer<
         tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
         FacilitatorHttpMakeSpan,
-        tower_http::trace::DefaultOnRequest,
+        FacilitatorHttpOnRequest,
         FacilitatorHttpOnResponse,
     > {
         TraceLayer::new_for_http()
             .make_span_with(FacilitatorHttpMakeSpan)
+            .on_request(FacilitatorHttpOnRequest)
             .on_response(FacilitatorHttpOnResponse)
     }
 }
@@ -455,16 +471,47 @@ impl TelemetryProviders {
 #[derive(Clone, Debug)]
 pub struct FacilitatorHttpMakeSpan;
 
+fn span_request_id(span: &Span) -> String {
+    span.id()
+        .map(|id| format!("{:x}", id.into_u64()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 impl<A> MakeSpan<A> for FacilitatorHttpMakeSpan {
     fn make_span(&mut self, request: &Request<A>) -> Span {
-        tracing::info_span!(
+        let span = tracing::info_span!(
             "http_request",
             otel.kind = "server",
             otel.name = %format!("{} {}", request.method(), request.uri()),
             method = %request.method(),
             uri = %request.uri(),
+            path = %request.uri().path(),
             version = ?request.version(),
-        )
+            request_id = tracing::field::Empty,
+        );
+        let request_id = span_request_id(&span);
+        span.record("request_id", request_id.as_str());
+        span
+    }
+}
+
+/// Custom request handler for HTTP tracing.
+///
+/// Emits one structured event at request start with stable fields for log search.
+#[derive(Clone, Debug)]
+pub struct FacilitatorHttpOnRequest;
+
+impl<A> OnRequest<A> for FacilitatorHttpOnRequest {
+    fn on_request(&mut self, request: &Request<A>, span: &Span) {
+        tracing::info!(
+            event = "request_start",
+            request_id = %span_request_id(span),
+            method = %request.method(),
+            uri = %request.uri(),
+            path = %request.uri().path(),
+            user_agent = ?request.headers().get("user-agent"),
+            "request received"
+        );
     }
 }
 
@@ -498,9 +545,11 @@ impl<A> OnResponse<A> for FacilitatorHttpOnResponse {
         }
 
         tracing::info!(
-            "status={} elapsed={}ms",
-            response.status().as_u16(),
-            latency.as_millis()
+            event = "request_completed",
+            request_id = %span_request_id(span),
+            status = %response.status().as_u16(),
+            elapsed_ms = %latency.as_millis(),
+            "request completed"
         );
     }
 }

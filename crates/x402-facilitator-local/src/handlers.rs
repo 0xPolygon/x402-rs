@@ -161,14 +161,36 @@ where
     A: Facilitator,
     A::Error: IntoResponse,
 {
+    #[cfg(feature = "telemetry")]
+    let scheme_handler = body
+        .scheme_handler_slug()
+        .map(|slug| slug.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    #[cfg(feature = "telemetry")]
+    tracing::info!(
+        event = "verify_start",
+        scheme_handler = %scheme_handler,
+        "processing verify request"
+    );
+
     match facilitator.verify(&body).await {
-        Ok(valid_response) => (StatusCode::OK, Json(valid_response)).into_response(),
+        Ok(valid_response) => {
+            #[cfg(feature = "telemetry")]
+            tracing::info!(
+                event = "verify_completed",
+                scheme_handler = %scheme_handler,
+                "payment verification completed"
+            );
+            (StatusCode::OK, Json(valid_response)).into_response()
+        }
         Err(error) => {
             #[cfg(feature = "telemetry")]
             tracing::warn!(
+                event = "verify_error",
+                scheme_handler = %scheme_handler,
                 error = ?error,
-                body = %serde_json::to_string(&body).unwrap_or_else(|_| "<can-not-serialize>".to_string()),
-                "Verification failed"
+                "verification failed"
             );
             error.into_response()
         }
@@ -196,14 +218,36 @@ where
     A: Facilitator,
     A::Error: IntoResponse,
 {
+    #[cfg(feature = "telemetry")]
+    let scheme_handler = body
+        .scheme_handler_slug()
+        .map(|slug| slug.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    #[cfg(feature = "telemetry")]
+    tracing::info!(
+        event = "settle_start",
+        scheme_handler = %scheme_handler,
+        "processing settle request"
+    );
+
     match facilitator.settle(&body).await {
-        Ok(valid_response) => (StatusCode::OK, Json(valid_response)).into_response(),
+        Ok(valid_response) => {
+            #[cfg(feature = "telemetry")]
+            tracing::info!(
+                event = "settle_completed",
+                scheme_handler = %scheme_handler,
+                "payment settlement completed"
+            );
+            (StatusCode::OK, Json(valid_response)).into_response()
+        }
         Err(error) => {
             #[cfg(feature = "telemetry")]
             tracing::warn!(
+                event = "settle_error",
+                scheme_handler = %scheme_handler,
                 error = ?error,
-                body = %serde_json::to_string(&body).unwrap_or_else(|_| "<can-not-serialize>".to_string()),
-                "Settlement failed"
+                "settlement failed"
             );
             error.into_response()
         }
