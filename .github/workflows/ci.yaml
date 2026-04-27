@@ -7,9 +7,7 @@ on:
 
 env:
   GH_REGISTRY: ghcr.io
-  GH_IMAGE_NAME: x402-rs/x402-facilitator
-  DH_REGISTRY: docker.io
-  DH_IMAGE_NAME: ukstv/x402-facilitator
+  GH_IMAGE_NAME: 0xpolygon/x402-facilitator
 
 jobs:
   metadata:
@@ -50,7 +48,7 @@ jobs:
         with:
           images: ${{ env.GH_REGISTRY }}/${{ env.GH_IMAGE_NAME }}
           tags: |
-            type=raw,value=dev
+            type=raw,value=${{ github.sha }}
           labels: true
           annotations: true
 
@@ -61,7 +59,6 @@ jobs:
         with:
           images: ${{ env.GH_REGISTRY }}/${{ env.GH_IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
@@ -103,13 +100,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.DH_REGISTRY }}
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Build and push ${{ matrix.arch }} image
         id: build-and-push
         uses: docker/build-push-action@v5
@@ -150,13 +140,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.DH_REGISTRY }}
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -190,7 +173,6 @@ jobs:
             echo "Merging images: $ARCH_IMAGES"
             docker buildx imagetools create \
               --tag ${{ env.GH_REGISTRY }}/${{ env.GH_IMAGE_NAME }}:$tag \
-              --tag ${{ env.DH_REGISTRY }}/${{ env.DH_IMAGE_NAME }}:$tag \
               --annotation "index:org.opencontainers.image.description=$DESCRIPTION" \
               $ARCH_IMAGES
 
@@ -220,23 +202,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.DH_REGISTRY }}
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Attest ${{ env.GH_REGISTRY }}/${{ env.GH_IMAGE_NAME }}:${{ matrix.digest_entry.tag }}
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ env.GH_REGISTRY }}/${{ env.GH_IMAGE_NAME }}
-          subject-digest: ${{ matrix.digest_entry.digest }}
-          push-to-registry: true
-
-      - name: Attest ${{ env.DH_REGISTRY }}/${{ env.DH_IMAGE_NAME }}:${{ matrix.digest_entry.tag }}
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ${{ env.DH_REGISTRY }}/${{ env.DH_IMAGE_NAME }}
           subject-digest: ${{ matrix.digest_entry.digest }}
           push-to-registry: true
