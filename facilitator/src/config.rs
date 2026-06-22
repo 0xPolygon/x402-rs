@@ -284,7 +284,7 @@ pub fn config_from_env() -> Result<Config, Box<dyn std::error::Error>> {
             flashblocks: false,
             signers,
             rpc: vec![RpcConfig {
-                http: rpc_url,
+                http: LiteralOrEnv::from_literal(rpc_url),
                 rate_limit: None,
             }],
             receipt_timeout_secs: 30,
