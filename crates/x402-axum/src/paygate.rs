@@ -48,6 +48,7 @@ use x402_types::proto::{SupportedResponse, v1, v2};
 use tracing::Instrument;
 #[cfg(feature = "telemetry")]
 use tracing::instrument;
+use x402_types::proto::v2::ExtensionsJson;
 use x402_types::util::Base64Bytes;
 
 // ============================================================================
@@ -55,24 +56,14 @@ use x402_types::util::Base64Bytes;
 // ============================================================================
 
 /// Builder for resource information that can be used with both V1 and V2 protocols.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResourceInfoBuilder {
     /// Description of the protected resource
-    pub description: String,
+    pub description: Option<String>,
     /// MIME type of the protected resource
-    pub mime_type: String,
+    pub mime_type: Option<String>,
     /// Optional explicit URL of the protected resource
     pub url: Option<String>,
-}
-
-impl Default for ResourceInfoBuilder {
-    fn default() -> Self {
-        Self {
-            description: "".to_string(),
-            mime_type: "application/json".to_string(),
-            url: None,
-        }
-    }
 }
 
 impl ResourceInfoBuilder {
@@ -164,6 +155,7 @@ pub trait PaygateProtocol: Clone + Send + Sync + 'static {
         err: PaygateError,
         accepts: &[Self],
         resource: &v2::ResourceInfo,
+        extensions: &ExtensionsJson,
     ) -> Response;
 
     /// Converts the verify response to the protocol-specific format and validates it.
@@ -215,6 +207,7 @@ impl PaygateProtocol for v1::PriceTag {
         err: PaygateError,
         accepts: &[Self],
         resource: &v2::ResourceInfo,
+        _extensions: &ExtensionsJson,
     ) -> Response {
         match err {
             PaygateError::Verification(err) => {
@@ -282,7 +275,7 @@ fn price_tag_to_v1_requirements_with_resource(
         network: price_tag.network.clone(),
         max_amount_required: price_tag.amount.clone(),
         resource: resource.url.clone(),
-        description: resource.description.clone(),
+        description: resource.description.clone().unwrap_or_default(),
         mime_type: resource.mime_type.clone(),
         output_schema: None,
         pay_to: price_tag.pay_to.clone(),
@@ -336,6 +329,7 @@ impl PaygateProtocol for v2::PriceTag {
         err: PaygateError,
         accepts: &[Self],
         resource: &v2::ResourceInfo,
+        extensions: &ExtensionsJson,
     ) -> Response {
         match err {
             PaygateError::Verification(err) => {
@@ -348,7 +342,8 @@ impl PaygateProtocol for v2::PriceTag {
                     error: Some(err.to_string()),
                     accepts: accepts.iter().map(|pt| pt.requirements.clone()).collect(),
                     x402_version: v2::X402Version2,
-                    resource: resource.clone(),
+                    resource: Some(resource.clone()),
+                    extensions: extensions.clone(),
                 };
                 // V2 sends payment required in the "Payment-Required" header (base64 encoded)
                 let payment_required_bytes =
@@ -422,6 +417,8 @@ pub struct Paygate<TPriceTag, TFacilitator> {
     pub accepts: Arc<Vec<TPriceTag>>,
     /// Resource information for the protected endpoint
     pub resource: v2::ResourceInfo,
+    /// Protocol extensions declared by the protected endpoint
+    pub extensions: Arc<ExtensionsJson>,
 }
 
 impl<TPriceTag, TFacilitator> Paygate<TPriceTag, TFacilitator> {
@@ -486,6 +483,7 @@ where
                     err,
                     &self.accepts,
                     &self.resource,
+                    &self.extensions,
                 ))
             }
         }
@@ -542,10 +540,15 @@ where
             tracing::debug!("Settling payment before request execution");
 
             let settlement = self.settle_payment(&verify_request).await?;
+            validate_settlement(&settlement)?;
 
-            let header_value = settlement_to_header(settlement)?;
+            let header_value = settlement_to_header(settlement.clone())?;
 
-            // Settlement succeeded, now execute the request
+            // Settlement succeeded, add it as an extension and execute the request
+            let (mut parts, body) = req.into_parts();
+            parts.extensions.insert(Some(settlement));
+            let req = Request::from_parts(parts, body);
+
             let response = match Self::call_inner(inner, req).await {
                 Ok(response) => response,
                 Err(err) => return Ok(err.into_response()),
@@ -553,7 +556,7 @@ where
 
             // Add payment response header
             let mut res = response;
-            res.headers_mut().insert("X-Payment-Response", header_value);
+            res.headers_mut().insert("Payment-Response", header_value);
             Ok(res.into_response())
         } else {
             // Settlement after execution (default): call inner handler first, then settle
@@ -563,6 +566,11 @@ where
             let verify_response = self.verify_payment(&verify_request).await?;
 
             TPriceTag::validate_verify_response(verify_response)?;
+
+            // Add None to extensions since we haven't settled yet
+            let (mut parts, body) = req.into_parts();
+            parts.extensions.insert(None::<proto::SettleResponse>);
+            let req = Request::from_parts(parts, body);
 
             let response = match Self::call_inner(inner, req).await {
                 Ok(response) => response,
@@ -574,11 +582,12 @@ where
             }
 
             let settlement = self.settle_payment(&verify_request).await?;
+            validate_settlement(&settlement)?;
 
             let header_value = settlement_to_header(settlement)?;
 
             let mut res = response;
-            res.headers_mut().insert("X-Payment-Response", header_value);
+            res.headers_mut().insert("Payment-Response", header_value);
             Ok(res.into_response())
         }
     }
@@ -627,6 +636,38 @@ where
     let base64 = Base64Bytes::from(header_bytes).decode().ok()?;
     let value = serde_json::from_slice(base64.as_ref()).ok()?;
     Some(value)
+}
+
+/// Validates that a [`proto::SettleResponse`] indicates successful settlement.
+///
+/// The facilitator may return HTTP 200 with `{ "success": false }` when on-chain
+/// settlement fails (e.g., insufficient funds, reverted transaction). Without this
+/// check, the paygate would serve the protected resource despite failed payment.
+///
+/// # Fail-safe behavior
+///
+/// - `success: true` → Ok
+/// - `success: false` → Error with `errorReason` extracted if available
+/// - `success` missing or non-boolean → Error (non-compliant facilitator response)
+///
+/// See: <https://github.com/x402-rs/x402-rs/issues/65>
+fn validate_settlement(settlement: &proto::SettleResponse) -> Result<(), PaygateError> {
+    match settlement.0.get("success").and_then(|v| v.as_bool()) {
+        Some(true) => Ok(()),
+        Some(false) => {
+            let reason = settlement
+                .0
+                .get("errorReason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            Err(PaygateError::Settlement(format!(
+                "facilitator returned success: false (reason: {reason})"
+            )))
+        }
+        None => Err(PaygateError::Settlement(
+            "settlement response missing boolean 'success' field".into(),
+        )),
+    }
 }
 
 /// Converts a [`proto::SettleResponse`] into an HTTP header value.
@@ -852,5 +893,68 @@ where
         base_url: Option<&Url>,
     ) -> Vec<Self::PriceTag> {
         (self.callback)(headers, uri, base_url).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn settle_response(value: serde_json::Value) -> proto::SettleResponse {
+        proto::SettleResponse(value)
+    }
+
+    #[test]
+    fn validate_settlement_success_true() {
+        let resp = settle_response(json!({ "success": true, "txHash": "0xabc" }));
+        assert!(validate_settlement(&resp).is_ok());
+    }
+
+    #[test]
+    fn validate_settlement_success_false_with_reason() {
+        let resp = settle_response(json!({
+            "success": false,
+            "errorReason": "insufficient_funds"
+        }));
+        let err = validate_settlement(&resp).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("success: false"), "got: {msg}");
+        assert!(msg.contains("insufficient_funds"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_settlement_success_false_no_reason() {
+        let resp = settle_response(json!({ "success": false }));
+        let err = validate_settlement(&resp).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn validate_settlement_missing_success_field() {
+        let resp = settle_response(json!({ "txHash": "0xabc" }));
+        let err = validate_settlement(&resp).unwrap_err();
+        assert!(err.to_string().contains("missing boolean"));
+    }
+
+    #[test]
+    fn validate_settlement_success_is_string() {
+        let resp = settle_response(json!({ "success": "true" }));
+        let err = validate_settlement(&resp).unwrap_err();
+        assert!(err.to_string().contains("missing boolean"));
+    }
+
+    #[test]
+    fn validate_settlement_success_is_number() {
+        let resp = settle_response(json!({ "success": 1 }));
+        let err = validate_settlement(&resp).unwrap_err();
+        assert!(err.to_string().contains("missing boolean"));
+    }
+
+    #[test]
+    fn validate_settlement_empty_object() {
+        let resp = settle_response(json!({}));
+        let err = validate_settlement(&resp).unwrap_err();
+        assert!(err.to_string().contains("missing boolean"));
     }
 }

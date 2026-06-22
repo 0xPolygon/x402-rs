@@ -14,8 +14,9 @@ use alloy_transport::TransportError;
 use alloy_transport::layers::{FallbackLayer, ThrottleLayer};
 use alloy_transport_http::Http;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 use tower::ServiceBuilder;
 use x402_types::chain::{ChainId, ChainProviderOps, FromConfig};
 
@@ -24,13 +25,23 @@ use tracing::Instrument;
 
 use crate::chain::config::{Eip155ChainConfig, RpcConfig};
 use crate::chain::pending_nonce_manager::PendingNonceManager;
+use crate::chain::permit2::{EXACT_PERMIT2_PROXY_ADDRESS, PERMIT2_ADDRESS};
 use crate::chain::types::Eip155ChainReference;
+use crate::v1_eip155_exact::VALIDATOR_ADDRESS;
 
 /// Combined filler type for gas, blob gas, nonce, and chain ID.
 pub type InnerFiller = JoinFill<
     GasFiller,
     JoinFill<BlobGasFiller, JoinFill<NonceFiller<PendingNonceManager>, ChainIdFiller>>,
 >;
+
+static REQUIRED_CONTRACT_ADDRESSES: LazyLock<Vec<Address>> = LazyLock::new(|| {
+    vec![
+        VALIDATOR_ADDRESS,
+        PERMIT2_ADDRESS,
+        EXACT_PERMIT2_PROXY_ADDRESS,
+    ]
+});
 
 /// The fully composed Ethereum provider type used in this project.
 ///
@@ -86,7 +97,7 @@ impl Eip155ChainProvider {
                 if !is_http {
                     return None;
                 }
-                let rpc_url = provider_config.http.clone();
+                let rpc_url = provider_config.http.deref().clone();
                 #[cfg(feature = "telemetry")]
                 tracing::info!(chain=%chain_id, rpc_url=%rpc_url, rate_limit=?provider_config.rate_limit, "Using HTTP transport");
                 let rate_limit = provider_config.rate_limit.unwrap_or(u32::MAX);
@@ -171,7 +182,7 @@ impl FromConfig<Eip155ChainConfig> for Eip155ChainProvider {
         // Build the filler stack: Gas -> BlobGas -> Nonce -> ChainId
         // This mirrors the InnerFiller type but with our custom nonce manager
         let filler = JoinFill::new(
-            GasFiller,
+            GasFiller::default(),
             JoinFill::new(
                 BlobGasFiller::default(),
                 JoinFill::new(
@@ -184,6 +195,8 @@ impl FromConfig<Eip155ChainConfig> for Eip155ChainProvider {
             .filler(filler)
             .wallet(wallet)
             .connect_client(client);
+
+        assert_contracts_exists(&inner).await?;
 
         #[cfg(feature = "telemetry")]
         tracing::info!(chain=%config.chain_id(), signers=?signer_addresses, "Using EVM provider");
@@ -254,7 +267,7 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
         &self,
         tx: MetaTransaction,
     ) -> Result<TransactionReceipt, Self::Error> {
-        let from_address = self.next_signer_address();
+        let from_address = tx.from.unwrap_or_else(|| self.next_signer_address());
         let mut txr = TransactionRequest::default()
             .with_to(tx.to)
             .with_from(from_address)
@@ -336,6 +349,33 @@ impl ChainProviderOps for Eip155ChainProvider {
     }
 }
 
+/// Provides access to the EIP-155 signer addresses held by a facilitator provider.
+///
+/// Implementations return the set of addresses whose private keys the provider
+/// controls and can use to submit on-chain transactions. The facilitator exposes
+/// one of these addresses to clients via the `supported()` endpoint so they can
+/// embed it in the Permit2 witness, ensuring only this facilitator can settle the
+/// authorized payment.
+pub trait Eip155SignerAddresses {
+    /// Returns an iterator over the signer addresses available on this provider.
+    fn signer_addresses(&self) -> Vec<Address>;
+}
+
+impl<T> Eip155SignerAddresses for Arc<T>
+where
+    T: Eip155SignerAddresses,
+{
+    fn signer_addresses(&self) -> Vec<Address> {
+        (**self).signer_addresses()
+    }
+}
+
+impl Eip155SignerAddresses for Eip155ChainProvider {
+    fn signer_addresses(&self) -> Vec<Address> {
+        (*self.signer_addresses).clone()
+    }
+}
+
 /// Meta-transaction parameters: target address, calldata, and required confirmations.
 pub struct MetaTransaction {
     /// Target contract address.
@@ -344,6 +384,24 @@ pub struct MetaTransaction {
     pub calldata: Bytes,
     /// Number of block confirmations to wait for.
     pub confirmations: u64,
+    /// Optional sender address.
+    pub from: Option<Address>,
+}
+
+impl MetaTransaction {
+    pub fn new(to: Address, calldata: Bytes) -> Self {
+        Self {
+            to,
+            calldata,
+            confirmations: 1,
+            from: None,
+        }
+    }
+
+    pub fn with_from(mut self, from: Address) -> Self {
+        self.from = Some(from);
+        self
+    }
 }
 
 /// Trait for sending meta-transactions with custom target and calldata.
@@ -383,4 +441,19 @@ impl<T: Eip155MetaTransactionProvider> Eip155MetaTransactionProvider for Arc<T> 
     ) -> impl Future<Output = Result<TransactionReceipt, Self::Error>> + Send {
         (**self).send_transaction(tx)
     }
+}
+
+pub async fn assert_contracts_exists<P: Provider>(
+    provider: &P,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for address in REQUIRED_CONTRACT_ADDRESSES.deref() {
+        let code = provider.get_code_at(*address).await?;
+        if code.is_empty() {
+            return Err(
+                format!("Contract at address {address} does not exist (empty code)").into(),
+            );
+        }
+    }
+
+    Ok(())
 }

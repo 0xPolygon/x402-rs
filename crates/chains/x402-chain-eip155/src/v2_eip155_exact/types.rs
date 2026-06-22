@@ -3,12 +3,11 @@
 //! This module re-exports types from V1 and defines V2-specific wire format
 //! types for ERC-3009 based payments on EVM chains.
 
-use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use x402_types::proto::v2;
 
-use crate::chain::permit2::Permit2Payload;
-use crate::chain::{AssetTransferMethod, ChecksummedAddress};
+use crate::chain::permit2::ExactPermit2Payload;
+use crate::chain::{AssetTransferMethod, ChecksummedAddress, DecimalU256};
 
 /// Re-export the "exact" scheme identifier from V1 (same for both versions).
 pub use crate::v1_eip155_exact::types::{ExactEvmPayload as Eip3009Payload, ExactScheme};
@@ -24,7 +23,7 @@ mod facilitator_only {
     use x402_types::proto::v2;
 
     use crate::chain::ChecksummedAddress;
-    use crate::chain::permit2::Permit2Payload;
+    use crate::chain::permit2::ExactPermit2Payload;
     use crate::v1_eip155_exact::ExactScheme;
     use crate::v2_eip155_exact::{Eip3009Payload, asset_transfer_method};
 
@@ -76,7 +75,8 @@ mod facilitator_only {
         ChecksummedAddress,
         asset_transfer_method::Permit2,
     >;
-    pub type Permit2PaymentPayload = v2::PaymentPayload<Permit2PaymentRequirements, Permit2Payload>;
+    pub type Permit2PaymentPayload =
+        v2::PaymentPayload<Permit2PaymentRequirements, ExactPermit2Payload>;
 }
 
 #[cfg(feature = "facilitator")]
@@ -94,13 +94,13 @@ pub type PaymentPayload<TPaymentRequirements = PaymentRequirements> =
 /// V2 uses CAIP-2 chain IDs and embeds requirements directly in the payload,
 /// unlike V1 which uses network names and separate requirement objects.
 pub type PaymentRequirements =
-    v2::PaymentRequirements<ExactScheme, U256, ChecksummedAddress, AssetTransferMethod>;
+    v2::PaymentRequirements<ExactScheme, DecimalU256, ChecksummedAddress, AssetTransferMethod>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ExactEvmPayload {
     Eip3009(Eip3009Payload),
-    Permit2(Permit2Payload),
+    Permit2(ExactPermit2Payload),
 }
 
 pub mod asset_transfer_method {
@@ -134,7 +134,7 @@ pub mod asset_transfer_method {
                 AssetTransferMethod::deserialize(deserializer)?;
             match asset_transfer_method {
                 AssetTransferMethod::Eip3009 { name, version } => Ok(Eip3009 { name, version }),
-                AssetTransferMethod::Permit2 => Err(serde::de::Error::custom(
+                AssetTransferMethod::Permit2 { .. } => Err(serde::de::Error::custom(
                     "expected EIP-3009 asset transfer method, got Permit2".to_string(),
                 )),
             }
@@ -157,7 +157,11 @@ pub mod asset_transfer_method {
 
 #[cfg(any(feature = "facilitator", feature = "client"))]
 pub mod facilitator_client_only {
+    use alloy_primitives::U256;
     use alloy_sol_types::sol;
+
+    use crate::chain::EOASignatureExt;
+    use crate::eip2612_gas_sponsoring::Eip2612GasSponsoringInfo;
 
     sol!(
         #[allow(missing_docs)]
@@ -167,6 +171,18 @@ pub mod facilitator_client_only {
         X402ExactPermit2Proxy,
         "abi/X402ExactPermit2Proxy.json"
     );
+
+    impl From<&Eip2612GasSponsoringInfo> for x402ExactPermit2Proxy::EIP2612Permit {
+        fn from(value: &Eip2612GasSponsoringInfo) -> Self {
+            Self {
+                value: value.amount,
+                deadline: U256::from(value.deadline.as_secs()),
+                r: value.signature.r_bytes(),
+                s: value.signature.s_bytes(),
+                v: value.signature.v_legacy(),
+            }
+        }
+    }
 
     sol!(
         /// Signature struct to do settle through [`X402ExactPermit2Proxy`]
@@ -178,7 +194,7 @@ pub mod facilitator_client_only {
             address spender;
             uint256 nonce;
             uint256 deadline;
-            x402BasePermit2Proxy.Witness witness;
+            x402ExactPermit2Proxy.Witness witness;
         }
     );
 }

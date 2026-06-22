@@ -37,7 +37,7 @@ where
         config: Option<serde_json::Value>,
     ) -> Result<Box<dyn X402SchemeFacilitator>, Box<dyn std::error::Error>> {
         let config = config
-            .map(serde_json::from_value::<V1SolanaExactFacilitatorConfig>)
+            .map(V1SolanaExactFacilitatorConfig::deserialize)
             .transpose()?
             .unwrap_or_default();
 
@@ -65,7 +65,7 @@ where
         &self,
         request: &proto::VerifyRequest,
     ) -> Result<proto::VerifyResponse, X402SchemeFacilitatorError> {
-        let request = types::VerifyRequest::from_proto(request.clone())?;
+        let request = types::VerifyRequest::try_from(request)?;
         let verification = verify_transfer(&self.provider, &request, &self.config).await?;
         Ok(v1::VerifyResponse::valid(verification.payer.to_string()).into())
     }
@@ -74,7 +74,7 @@ where
         &self,
         request: &proto::SettleRequest,
     ) -> Result<proto::SettleResponse, X402SchemeFacilitatorError> {
-        let request = types::SettleRequest::from_proto(request.clone())?;
+        let request = types::SettleRequest::try_from(request)?;
         let verification = verify_transfer(&self.provider, &request, &self.config).await?;
         let payer = verification.payer.to_string();
         let tx_sig = settle_transaction(&self.provider, verification).await?;

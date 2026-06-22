@@ -4,25 +4,22 @@ use x402_types::timestamp::UnixTimestamp;
 
 use crate::chain::ChecksummedAddress;
 
-// TODO configurable address per chain
-/// The canonical Permit2 contract address deployed on most chains.
+/// The canonical Permit2 contract address.
 pub const PERMIT2_ADDRESS: Address = address!("0x000000000022D473030F116dDEE9F6B43aC78BA3");
 
-// TODO configurable address per chain
 /// The X402 ExactPermit2Proxy contract address for settling Permit2 payments.
 pub const EXACT_PERMIT2_PROXY_ADDRESS: Address =
-    address!("0x4020615294c913F045dc10f0a5cdEbd86c280001");
+    address!("0x402085c248EeA27D92E8b30b2C58ed07f9E20001");
 
-// TODO configurable address per chain
 /// The X402 UptoPermit2Proxy contract address for settling Permit2 payments with variable amounts.
 /// This contract allows settling for any amount up to the permitted maximum.
 pub const UPTO_PERMIT2_PROXY_ADDRESS: Address =
-    address!("0x4020633461b2895a48930ff97ee8fcde8e520002");
+    address!("0x4020A4f3b7b90ccA423B9fabCc0CE57C6C240002");
 
 /// Authorization details for a Permit2 call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Permit2Authorization {
+pub struct Permit2Authorization<TWitness> {
     /// Deadline after which the authorization expires.
     pub deadline: UnixTimestamp,
     /// The address authorizing the transfer (the payer).
@@ -35,7 +32,7 @@ pub struct Permit2Authorization {
     /// The spender address (must be the X402 Permit2Proxy).
     pub spender: ChecksummedAddress,
     /// Witness data binding the recipient.
-    pub witness: Permit2Witness,
+    pub witness: TWitness,
 }
 
 /// Token and amount details for Permit2 authorization.
@@ -53,12 +50,25 @@ pub struct Permit2AuthorizationPermitted {
 
 /// Witness data for Permit2 upto payments.
 ///
+/// Binds both the recipient address and the authorized facilitator address,
+/// preventing unauthorized settlement or fund redirection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UptoPermit2Witness {
+    /// The recipient address that will receive the funds.
+    pub to: ChecksummedAddress,
+    /// The facilitator address authorized to settle this payment (must be msg.sender on-chain).
+    pub facilitator: ChecksummedAddress,
+    /// Time after which the authorization becomes valid.
+    pub valid_after: UnixTimestamp,
+}
+
+/// Witness data for Permit2 exact payments.
+///
 /// Binds the recipient address to prevent the facilitator from redirecting funds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Permit2Witness {
-    /// Extra data (can be empty for basic transfers).
-    pub extra: Bytes,
+pub struct ExactPermit2Witness {
     /// The recipient address that will receive the funds.
     pub to: ChecksummedAddress,
     /// Time after which the authorization becomes valid.
@@ -72,7 +82,10 @@ pub struct Permit2Witness {
 /// depending on the scheme/proxy contract used.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Permit2Payload {
-    pub permit_2_authorization: Permit2Authorization,
+pub struct Permit2Payload<TWitness> {
+    pub permit_2_authorization: Permit2Authorization<TWitness>,
     pub signature: Bytes,
 }
+
+pub type ExactPermit2Payload = Permit2Payload<ExactPermit2Witness>;
+pub type UptoPermit2Payload = Permit2Payload<UptoPermit2Witness>;

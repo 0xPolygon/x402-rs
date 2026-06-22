@@ -78,6 +78,7 @@ impl Display for X402Version1 {
 /// Response from a payment settlement request.
 ///
 /// Indicates whether the payment was successfully settled on-chain.
+#[derive(Debug, Clone)]
 pub enum SettleResponse {
     /// Settlement succeeded.
     Success {
@@ -206,7 +207,7 @@ impl TryFrom<proto::VerifyResponse> for VerifyResponse {
     type Error = serde_json::Error;
     fn try_from(value: proto::VerifyResponse) -> Result<Self, Self::Error> {
         let json = value.0;
-        serde_json::from_value(json)
+        Self::deserialize(json)
     }
 }
 
@@ -297,15 +298,15 @@ pub struct VerifyRequest<TPayload, TRequirements> {
     pub payment_requirements: TRequirements,
 }
 
-impl<TPayload, TRequirements> VerifyRequest<TPayload, TRequirements>
+impl<TPayload, TRequirements> TryFrom<&proto::VerifyRequest>
+    for VerifyRequest<TPayload, TRequirements>
 where
     Self: DeserializeOwned,
 {
-    pub fn from_proto(
-        // FIXME REMOVE THIS
-        request: proto::VerifyRequest,
-    ) -> Result<Self, proto::PaymentVerificationError> {
-        let value = serde_json::from_str(request.as_str())?;
+    type Error = proto::PaymentVerificationError;
+
+    fn try_from(value: &proto::VerifyRequest) -> Result<Self, Self::Error> {
+        let value = serde_json::from_str(value.as_str())?;
         Ok(value)
     }
 }
@@ -376,7 +377,7 @@ pub struct PaymentRequirements<
     /// Human-readable description of the resource.
     pub description: String,
     /// MIME type of the resource.
-    pub mime_type: String,
+    pub mime_type: Option<String>,
     /// Optional JSON schema for the resource output.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,

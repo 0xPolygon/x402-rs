@@ -46,6 +46,8 @@ use x402_chain_aptos::V2AptosExact;
 use x402_chain_eip155::{V1Eip155Exact, V2Eip155Exact, V2Eip155Upto};
 #[cfg(feature = "chain-solana")]
 use x402_chain_solana::{V1SolanaExact, V2SolanaExact};
+#[cfg(feature = "chain-tron")]
+use x402_chain_tron::V2TronExact;
 #[cfg(feature = "telemetry")]
 use x402_facilitator_local::util::Telemetry;
 
@@ -68,13 +70,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
 
     #[cfg(feature = "telemetry")]
-    let telemetry_layer = {
-        let telemetry = Telemetry::new()
-            .with_name(env!("CARGO_PKG_NAME"))
-            .with_version(env!("CARGO_PKG_VERSION"))
-            .register();
-        telemetry.http_tracing()
-    };
+    let telemetry_providers = Telemetry::new()
+        .with_name(env!("CARGO_PKG_NAME"))
+        .with_version(env!("CARGO_PKG_VERSION"))
+        .register();
+    #[cfg(feature = "telemetry")]
+    let telemetry_layer = telemetry_providers.http_tracing();
 
     let config = match Config::load() {
         Ok(config) => config,
@@ -115,6 +116,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(feature = "chain-aptos")]
         {
             scheme_blueprints.register(V2AptosExact);
+        }
+        #[cfg(feature = "chain-tron")]
+        {
+            scheme_blueprints.register(V2TronExact);
         }
         scheme_blueprints
     };

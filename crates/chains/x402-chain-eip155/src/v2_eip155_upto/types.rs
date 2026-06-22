@@ -9,15 +9,36 @@ use x402_types::proto::v2;
 use x402_types::{lit_str, proto};
 
 use crate::chain::ChecksummedAddress;
-use crate::chain::permit2::Permit2Payload;
+use crate::chain::permit2::UptoPermit2Payload;
 
 lit_str!(UptoScheme, "upto");
+
+/// Extra metadata returned by the facilitator's `supported()` endpoint for the upto scheme,
+/// and injected into payment requirements so the client can embed the facilitator address
+/// in the Permit2 witness.
+///
+/// This struct holds additional response data returned by the facilitator's
+/// `supported` method, including supported extensions.
+///
+/// # Fields
+///
+/// - `extensions`: Optional list of supported extension identifiers.
+///   These extensions indicate additional features the facilitator supports,
+///   such as EIP-2612 gas sponsoring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UptoSupportedExtra<TAddress = String> {
+    /// The facilitator address the client must place in `witness.facilitator`.
+    pub facilitator_address: TAddress,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
+}
 
 /// Type alias for V2 verify requests using the upto EVM payment scheme.
 pub type VerifyRequest = v2::VerifyRequest<PaymentPayload, PaymentRequirements>;
 
 pub type Permit2PaymentRequirements = v2::PaymentRequirements<UptoScheme, U256, ChecksummedAddress>;
-pub type Permit2PaymentPayload = v2::PaymentPayload<Permit2PaymentRequirements, Permit2Payload>;
+pub type Permit2PaymentPayload = v2::PaymentPayload<Permit2PaymentRequirements, UptoPermit2Payload>;
 
 /// Settlement response for the upto scheme.
 ///
@@ -80,7 +101,7 @@ pub type SettleRequest = VerifyRequest;
 
 /// Type alias for V2 payment payloads with embedded requirements and EVM-specific data.
 pub type PaymentPayload<TPaymentRequirements = PaymentRequirements> =
-    v2::PaymentPayload<TPaymentRequirements, Permit2Payload>;
+    v2::PaymentPayload<TPaymentRequirements, UptoPermit2Payload>;
 
 /// Type alias for V2 payment requirements with EVM-specific types for the upto scheme.
 ///
@@ -90,7 +111,11 @@ pub type PaymentRequirements = v2::PaymentRequirements<UptoScheme, U256, Checksu
 
 #[cfg(any(feature = "facilitator", feature = "client"))]
 pub mod facilitator_client_only {
+    use alloy_primitives::U256;
     use alloy_sol_types::sol;
+
+    use crate::chain::EOASignatureExt;
+    use crate::eip2612_gas_sponsoring::Eip2612GasSponsoringInfo;
 
     sol!(
         #[allow(missing_docs)]
@@ -102,6 +127,27 @@ pub mod facilitator_client_only {
     );
 
     sol!(
+        #[allow(missing_docs)]
+        #[allow(clippy::too_many_arguments)]
+        #[derive(Debug)]
+        #[sol(rpc)]
+        IERC20Permit,
+        "abi/IERC20Permit.json"
+    );
+
+    impl From<&Eip2612GasSponsoringInfo> for x402UptoPermit2Proxy::EIP2612Permit {
+        fn from(value: &Eip2612GasSponsoringInfo) -> Self {
+            Self {
+                value: value.amount,
+                deadline: U256::from(value.deadline.as_secs()),
+                r: value.signature.r_bytes(),
+                s: value.signature.s_bytes(),
+                v: value.signature.v_legacy(),
+            }
+        }
+    }
+
+    sol!(
         /// Signature struct to do settle through [`X402UptoPermit2Proxy`]
         #[allow(clippy::too_many_arguments)]
         #[derive(Debug)]
@@ -110,7 +156,7 @@ pub mod facilitator_client_only {
             address spender;
             uint256 nonce;
             uint256 deadline;
-            x402BasePermit2Proxy.Witness witness;
+            x402UptoPermit2Proxy.Witness witness;
         }
     );
 }
