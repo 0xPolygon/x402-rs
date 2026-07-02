@@ -304,12 +304,11 @@ pub fn config_from_env() -> Result<Config, Box<dyn std::error::Error>> {
             chains: ChainIdPattern::wildcard("eip155"),
             config: None,
         },
-        SchemeConfig {
-            enabled: true,
-            id: "v2-eip155-upto".to_string(),
-            chains: ChainIdPattern::wildcard("eip155"),
-            config: None,
-        },
+        // NOTE: `v2-eip155-upto` is intentionally NOT registered. The upto scheme binds each
+        // payment to a specific facilitator signer (Permit2 witness), which does not work on the
+        // current multi-instance deployment (each instance has a disjoint signer set, so settle
+        // requests routed to another instance fail). Re-add this once the infrastructure supports
+        // a shared signer set or signer-aware routing. The upto implementation remains compiled in.
     ];
 
     Ok(Config::new(
@@ -381,9 +380,17 @@ mod tests {
         let config = config_from_env().expect("env config should parse");
 
         assert_eq!(config.chains().len(), 1);
-        assert_eq!(config.schemes().len(), 3);
+        assert_eq!(config.schemes().len(), 2);
+        // v2-eip155-exact is registered...
         assert!(
             config
+                .schemes()
+                .iter()
+                .any(|scheme| scheme.id == "v2-eip155-exact")
+        );
+        // ...but v2-eip155-upto is intentionally NOT advertised (unsupported on multi-instance infra).
+        assert!(
+            !config
                 .schemes()
                 .iter()
                 .any(|scheme| scheme.id == "v2-eip155-upto")
